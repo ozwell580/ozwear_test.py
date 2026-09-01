@@ -54,8 +54,30 @@ def get_response_preview(response):
     return text[:500]
 
 
+def try_request(method, headers, auth, params=None, json_body=None):
+    """지정된 방식으로 요청 1회를 시도하고 응답을 반환합니다."""
+
+    try:
+        response = requests.request(
+            method,
+            OZWEAR_API_URL,
+            headers=headers,
+            auth=auth,
+            params=params,
+            json=json_body,
+            timeout=60,
+        )
+        return response, None
+
+    except requests.exceptions.Timeout:
+        return None, "요청 시간이 초과되었습니다."
+
+    except requests.exceptions.RequestException as error:
+        return None, f"네트워크 요청 실패: {error}"
+
+
 def fetch_ozwear_products():
-    """여러 인증 방식을 순서대로 테스트합니다."""
+    """여러 인증 방식 x HTTP 메서드 조합을 순서대로 테스트합니다."""
 
     if not OZWEAR_API_KEY:
         raise RuntimeError("OZWEAR_API_KEY가 설정되지 않았습니다.")
@@ -63,34 +85,57 @@ def fetch_ozwear_products():
     if not OZWEAR_API_SECRET:
         raise RuntimeError("OZWEAR_API_SECRET이 설정되지 않았습니다.")
 
+    # 로그 분석 결과: Basic Auth는 403이 아니라 405(GET 미지원)였음.
+    # → 인증 자체는 Basic Auth가 맞을 가능성이 높고, 메서드가 문제였을 가능성이 큼.
+    # 그래서 Basic Auth를 먼저, 그리고 GET과 POST를 모두 시도한다.
     attempts = [
         {
-            "name": "API-Key / API-Secret headers",
+            "name": "HTTP Basic Auth + GET",
+            "method": "GET",
+            "headers": {"Accept": "application/json"},
+            "auth": HTTPBasicAuth(OZWEAR_API_KEY, OZWEAR_API_SECRET),
+            "params": None,
+            "json_body": None,
+        },
+        {
+            "name": "HTTP Basic Auth + POST (빈 body)",
+            "method": "POST",
+            "headers": {"Accept": "application/json", "Content-Type": "application/json"},
+            "auth": HTTPBasicAuth(OZWEAR_API_KEY, OZWEAR_API_SECRET),
+            "params": None,
+            "json_body": {},
+        },
+        {
+            "name": "HTTP Basic Auth + GET (Content-Type 없이, 쿼리파라미터 포함)",
+            "method": "GET",
+            "headers": {"Accept": "application/json"},
+            "auth": HTTPBasicAuth(OZWEAR_API_KEY, OZWEAR_API_SECRET),
+            "params": {"limit": 50, "offset": 0},
+            "json_body": None,
+        },
+        {
+            "name": "API-Key / API-Secret headers + GET",
+            "method": "GET",
             "headers": {
                 "Accept": "application/json",
                 "API-Key": OZWEAR_API_KEY,
                 "API-Secret": OZWEAR_API_SECRET,
             },
             "auth": None,
+            "params": None,
+            "json_body": None,
         },
         {
-            "name": "X-API-Key / X-API-Secret headers",
+            "name": "X-API-Key / X-API-Secret headers + GET",
+            "method": "GET",
             "headers": {
                 "Accept": "application/json",
                 "X-API-Key": OZWEAR_API_KEY,
                 "X-API-Secret": OZWEAR_API_SECRET,
             },
             "auth": None,
-        },
-        {
-            "name": "HTTP Basic Authentication",
-            "headers": {
-                "Accept": "application/json",
-            },
-            "auth": HTTPBasicAuth(
-                OZWEAR_API_KEY,
-                OZWEAR_API_SECRET,
-            ),
+            "params": None,
+            "json_body": None,
         },
     ]
 
@@ -99,35 +144,25 @@ def fetch_ozwear_products():
 
     for attempt_number, attempt in enumerate(attempts, start=1):
         print("")
-        print(
-            f"인증 방식 {attempt_number}/{len(attempts)} 테스트: "
-            f"{attempt['name']}"
+        print(f"시도 {attempt_number}/{len(attempts)}: {attempt['name']}")
+
+        response, error = try_request(
+            attempt["method"],
+            attempt["headers"],
+            attempt["auth"],
+            attempt.get("params"),
+            attempt.get("json_body"),
         )
 
-        try:
-            response = requests.get(
-                OZWEAR_API_URL,
-                headers=attempt["headers"],
-                auth=attempt["auth"],
-                timeout=60,
-            )
-
-        except requests.exceptions.Timeout:
-            print("요청 시간이 초과되었습니다.")
-            continue
-
-        except requests.exceptions.RequestException as error:
-            print(f"네트워크 요청 실패: {error}")
+        if error:
+            print(error)
             continue
 
         last_status = response.status_code
         last_preview = get_response_preview(response)
 
         print(f"HTTP status: {response.status_code}")
-        print(
-            "Content-Type: "
-            f"{response.headers.get('Content-Type', '확인 불가')}"
-        )
+        print(f"Content-Type: {response.headers.get('Content-Type', '확인 불가')}")
 
         if response.status_code < 200 or response.status_code >= 300:
             print(f"서버 응답: {last_preview}")
@@ -138,15 +173,16 @@ def fetch_ozwear_products():
 
         except ValueError as error:
             raise RuntimeError(
-                "연결은 성공했지만 API 응답이 JSON 형식이 아닙니다."
+                "연결은 성공했지만 API 응답이 JSON 형식이 아닙니다. "
+                f"응답 미리보기: {last_preview}"
             ) from error
 
-        print(f"인증 성공: {attempt['name']}")
+        print(f"성공: {attempt['name']}")
         save_products(data)
         return
 
     raise RuntimeError(
-        "모든 인증 방식이 실패했습니다. "
+        "모든 조합이 실패했습니다. "
         f"마지막 HTTP 상태: {last_status}, "
         f"마지막 서버 응답: {last_preview}"
     )
