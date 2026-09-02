@@ -3,9 +3,6 @@ name: Test OZWear API
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
   test-ozwear-api:
     runs-on: ubuntu-latest
@@ -20,19 +17,24 @@ jobs:
           python-version: "3.12"
 
       - name: Install packages
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
       - name: Test OZWear API
         env:
           OZWEAR_API_KEY: ${{ secrets.OZWEAR_API_KEY }}
           OZWEAR_API_SECRET: ${{ secrets.OZWEAR_API_SECRET }}
-          OZWEAR_API_URL: https://api.ozwearugg.net/rest/s1/openapi/products
+          OZWEAR_VERIFY_SSL: "false"
         run: python ozwear_test.py
 
-      - name: Save API result
-        if: success()
+      - name: Save API results
         uses: actions/upload-artifact@v4
         with:
-          name: ozwear-products
-          path: ozwear_products.json
-          retention-days: 3
+          name: ozwear-api-results
+          path: |
+            ozwear_products.json
+            ozwear_stocks.json
+            ozwear_inventory.csv
+          if-no-files-found: error
+          retention-days: 7
