@@ -1,157 +1,273 @@
+import csv
 import json
 import os
 import sys
+import time
 
 import requests
+import urllib3
 
 
-BASE_URL = "https://api.ozwearugg.net/rest/s1/openapi"
-
-TOKEN_URL = f"{BASE_URL}/token"
-PRODUCTS_URL = f"{BASE_URL}/products"
+TOKEN_URL = "https://api.ozwearugg.net/rest/s1/openapi/token"
+PRODUCTS_URL = "https://api.ozwearugg.net/rest/s1/openapi/products"
+STOCK_URL = "https://api.ozwearugg.net/rest/s1/openapi/products/stock"
 
 API_KEY = os.environ.get("OZWEAR_API_KEY")
 API_SECRET = os.environ.get("OZWEAR_API_SECRET")
 
+# 오즈웨어 서버 인증서 문제 때문에 테스트에서만 SSL 검증을 끕니다.
+VERIFY_SSL = os.environ.get(
+    "OZWEAR_VERIFY_SSL", "false"
+).lower() == "true"
 
-def get_api_token():
-    """API Key와 Secret으로 임시 Token을 발급받습니다."""
+if not VERIFY_SSL:
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-    if not API_KEY:
-        raise RuntimeError("OZWEAR_API_KEY가 설정되지 않았습니다.")
 
-    if not API_SECRET:
-        raise RuntimeError("OZWEAR_API_SECRET이 설정되지 않았습니다.")
-
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    }
-
-    payload = {
-        "key": API_KEY,
-        "secret": API_SECRET,
-    }
-
-    print("OZWear API Token 요청 중...")
+def post_json(url, headers=None, body=None):
+    """OZWear API에 POST 요청을 보냅니다."""
 
     response = requests.post(
-        TOKEN_URL,
-        headers=headers,
-        json=payload,
+        url,
+        headers=headers or {},
+        json=body or {},
         timeout=60,
+        verify=VERIFY_SSL,
     )
 
-    print(f"Token API status: {response.status_code}")
+    print(f"POST {url}")
+    print(f"HTTP status: {response.status_code}")
 
-    if response.status_code < 200 or response.status_code >= 300:
-        print(f"Token API response: {response.text[:500]}")
+    if not response.ok:
+        print(f"서버 응답: {response.text[:1000]}")
         response.raise_for_status()
 
     try:
-        body = response.json()
+        return response.json()
 
     except ValueError as error:
         raise RuntimeError(
-            "Token API 응답이 JSON 형식이 아닙니다."
+            f"JSON 응답이 아닙니다: {response.text[:500]}"
         ) from error
 
-    data = body.get("data", {})
 
-    if not isinstance(data, dict):
-        raise RuntimeError(
-            f"Token API data 형식이 예상과 다릅니다: {body}"
-        )
+def get_token():
+    """API Key와 Secret으로 토큰을 발급받습니다."""
 
-    token = data.get("token")
-    expired_time = data.get("expiredTime")
+    print("\n1. OZWear API 토큰 요청 중...")
+
+    response = post_json(
+        TOKEN_URL,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        body={
+            "key": API_KEY,
+            "secret": API_SECRET,
+        },
+    )
+
+    token = response.get("data", {}).get("token")
 
     if not token:
         raise RuntimeError(
-            f"Token API 응답에서 token을 찾지 못했습니다: {body}"
+            f"토큰이 응답에 없습니다: {json.dumps(response, ensure_ascii=False)}"
         )
 
-    print("OZWear API Token 발급 성공")
-
-    if expired_time:
-        print(f"Token expiry: {expired_time}")
-
+    print("토큰 발급 성공")
     return token
 
 
-def fetch_products(token):
-    """발급받은 Token으로 상품 데이터를 조회합니다."""
+def get_products(token):
+    """상품 API에서 테스트용 상품 목록을 가져옵니다."""
 
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "api_key": token,
-    }
+    print("\n2. OZWear 상품 목록 요청 중...")
 
-    # 상품 API에서 별도 조건을 요구하지 않을 경우 빈 JSON을 전송합니다.
-    payload = {}
-
-    print("OZWear 상품 데이터 요청 중...")
-
-    response = requests.post(
+    response = post_json(
         PRODUCTS_URL,
-        headers=headers,
-        json=payload,
-        timeout=180,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "api_key": token,
+        },
+        body={},
     )
 
-    print(f"Products API status: {response.status_code}")
-    print(
-        "Content-Type: "
-        f"{response.headers.get('Content-Type', 'Unknown')}"
-    )
+    products = response.get("data", {}).get("list", [])
+    total = response.get("data", {}).get("total", 0)
 
-    if response.status_code < 200 or response.status_code >= 300:
-        print(f"Products API response: {response.text[:1000]}")
-        response.raise_for_status()
+    if not isinstance(products, list):
+        raise RuntimeError("상품 목록 형식이 올바르지 않습니다.")
 
-    try:
-        products = response.json()
+    print(f"전체 상품 옵션 수: {total}")
+    print(f"이번 테스트 상품 옵션 수: {len(products)}")
 
-    except ValueError as error:
-        raise RuntimeError(
-            "Products API 응답이 JSON 형식이 아닙니다."
-        ) from error
+    with open("ozwear_products.json", "w", encoding="utf-8") as file:
+        json.dump(response, file, ensure_ascii=False, indent=2)
 
-    with open(
-        "ozwear_products.json",
-        "w",
-        encoding="utf-8",
-    ) as file:
+    return products
+
+
+def split_batches(values, batch_size=50):
+    """SKU를 최대 50개씩 나눕니다."""
+
+    for start in range(0, len(values), batch_size):
+        yield values[start:start + batch_size]
+
+
+def get_stocks(token, products):
+    """상품 SKU를 50개씩 나누어 재고를 조회합니다."""
+
+    skus = []
+
+    for product in products:
+        sku = str(product.get("sku", "")).strip()
+
+        if sku and sku not in skus:
+            skus.append(sku)
+
+    if not skus:
+        raise RuntimeError("상품 목록에서 SKU를 찾지 못했습니다.")
+
+    print(f"\n3. 총 {len(skus)}개 SKU 재고 조회 시작...")
+
+    all_stocks = []
+
+    for batch_number, sku_batch in enumerate(
+        split_batches(skus, 50),
+        start=1,
+    ):
+        print(
+            f"재고 요청 {batch_number}: "
+            f"{len(sku_batch)}개 SKU"
+        )
+
+        response = post_json(
+            STOCK_URL,
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "api_key": token,
+            },
+            body={
+                "skus": sku_batch,
+                "productIds": [],
+            },
+        )
+
+        stock_list = response.get("data", {}).get("list", [])
+
+        if not isinstance(stock_list, list):
+            raise RuntimeError(
+                f"재고 응답 형식이 올바르지 않습니다: {response}"
+            )
+
+        all_stocks.extend(stock_list)
+
+        # API 서버에 무리가 가지 않도록 요청 사이에 잠시 대기
+        time.sleep(0.5)
+
+    print(f"재고 조회 완료: {len(all_stocks)}건")
+
+    with open("ozwear_stocks.json", "w", encoding="utf-8") as file:
         json.dump(
-            products,
+            {
+                "data": {
+                    "list": all_stocks,
+                    "count": len(all_stocks),
+                }
+            },
             file,
             ensure_ascii=False,
             indent=2,
         )
 
-    if isinstance(products, list):
-        print(f"상품 데이터 {len(products)}건 수집 완료")
+    return all_stocks
 
-    elif isinstance(products, dict):
-        print(
-            "상품 API 최상위 항목: "
-            f"{list(products.keys())[:20]}"
+
+def create_inventory_csv(products, stocks):
+    """상품정보와 재고정보를 SKU 기준으로 합쳐 CSV로 저장합니다."""
+
+    stock_map = {}
+
+    for stock_item in stocks:
+        sku = str(stock_item.get("sku", "")).strip()
+
+        if sku:
+            stock_map[sku] = stock_item
+
+    rows = []
+
+    for product in products:
+        sku = str(product.get("sku", "")).strip()
+        stock_item = stock_map.get(sku, {})
+
+        try:
+            stock_quantity = int(stock_item.get("stock", 0) or 0)
+
+        except (TypeError, ValueError):
+            stock_quantity = 0
+
+        rows.append(
+            {
+                "productId": product.get("productId", ""),
+                "code": product.get("code", ""),
+                "sku": sku,
+                "name": product.get("name", ""),
+                "color": product.get("color", ""),
+                "auSize": product.get("auSize", ""),
+                "euSize": product.get("euSize", ""),
+                "stock": stock_quantity,
+                "status": stock_item.get("status", ""),
+                "imageUrl": product.get("imageUrl", ""),
+            }
         )
 
-        for key in ("products", "data", "items", "result"):
-            value = products.get(key)
+    fieldnames = [
+        "productId",
+        "code",
+        "sku",
+        "name",
+        "color",
+        "auSize",
+        "euSize",
+        "stock",
+        "status",
+        "imageUrl",
+    ]
 
-            if isinstance(value, list):
-                print(f"'{key}' 데이터: {len(value)}건")
-                break
+    with open(
+        "ozwear_inventory.csv",
+        "w",
+        newline="",
+        encoding="utf-8-sig",
+    ) as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
 
-    print("ozwear_products.json 저장 완료")
+    matched = sum(1 for row in rows if row["sku"] in stock_map)
+
+    print("\n4. 재고 CSV 생성 완료")
+    print(f"상품 수: {len(rows)}")
+    print(f"재고 API와 일치한 SKU: {matched}")
+    print("저장 파일: ozwear_inventory.csv")
 
 
 def main():
-    token = get_api_token()
-    fetch_products(token)
+    if not API_KEY:
+        raise RuntimeError("OZWEAR_API_KEY Secret이 없습니다.")
+
+    if not API_SECRET:
+        raise RuntimeError("OZWEAR_API_SECRET Secret이 없습니다.")
+
+    token = get_token()
+    products = get_products(token)
+    stocks = get_stocks(token, products)
+    create_inventory_csv(products, stocks)
+
+    print("\nOZWear 상품 및 재고 API 테스트 성공")
 
 
 if __name__ == "__main__":
@@ -159,6 +275,5 @@ if __name__ == "__main__":
         main()
 
     except Exception as error:
-        print("")
-        print(f"OZWear API 테스트 실패: {error}")
+        print(f"\nOZWear API 테스트 실패: {error}")
         sys.exit(1)
