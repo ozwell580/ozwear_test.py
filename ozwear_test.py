@@ -15,7 +15,7 @@ API_SECRET = os.environ.get("OZWEAR_API_SECRET")
 
 
 def get_api_token():
-    """API Key와 Secret으로 임시 API Token을 발급받습니다."""
+    """API Key와 Secret으로 임시 Token을 발급받습니다."""
 
     if not API_KEY:
         raise RuntimeError("OZWEAR_API_KEY가 설정되지 않았습니다.")
@@ -60,7 +60,7 @@ def get_api_token():
 
     if not isinstance(data, dict):
         raise RuntimeError(
-            f"Token API의 data 형식이 예상과 다릅니다: {body}"
+            f"Token API data 형식이 예상과 다릅니다: {body}"
         )
 
     token = data.get("token")
@@ -76,24 +76,28 @@ def get_api_token():
     if expired_time:
         print(f"Token expiry: {expired_time}")
 
-    # 보안을 위해 Token 값 자체는 출력하지 않습니다.
     return token
 
 
 def fetch_products(token):
-    """발급받은 Token으로 OZWear 상품 데이터를 가져옵니다."""
+    """발급받은 Token으로 상품 데이터를 조회합니다."""
 
     headers = {
         "Accept": "application/json",
+        "Content-Type": "application/json",
         "api_key": token,
     }
 
+    # 상품 API에서 별도 조건을 요구하지 않을 경우 빈 JSON을 전송합니다.
+    payload = {}
+
     print("OZWear 상품 데이터 요청 중...")
 
-    response = requests.get(
+    response = requests.post(
         PRODUCTS_URL,
         headers=headers,
-        timeout=120,
+        json=payload,
+        timeout=180,
     )
 
     print(f"Products API status: {response.status_code}")
@@ -103,7 +107,7 @@ def fetch_products(token):
     )
 
     if response.status_code < 200 or response.status_code >= 300:
-        print(f"Products API response: {response.text[:500]}")
+        print(f"Products API response: {response.text[:1000]}")
         response.raise_for_status()
 
     try:
