@@ -9,6 +9,10 @@ jobs:
     steps:
     - name: 저장소 코드 가져오기
       uses: actions/checkout@v4
+      with:
+        sparse-checkout: |
+          sync_ozwear_inventory.py
+        sparse-checkout-cone-mode: false
     - name: 파이썬 환경 설정
       uses: actions/setup-python@v5
       with:
